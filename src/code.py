@@ -3,14 +3,14 @@ QT Py RP2040 — 4-Button HID Keyboard
 CircuitPython
 
 Zapojení:
-  A0 - Button 0  (pull-up, druhý konec na GND)
-  A1 - Button 1
-  A2 - Button 2
-  A3 - Button 3
-  TX - LED + rezistor (cca 330Ω) na GND
+  GPIO0 - Button 0  (+ pull-up, druhý konec na GND)
+  GPIO1 - Button 1
+  GPIO2 - Button 2
+  GPIO3 - Button 3
 
 Požadované knihovny (do /lib):
   adafruit_hid/
+  neopixel.mpy
 """
 
 import time
@@ -18,6 +18,7 @@ import json
 import board
 import alarm
 import digitalio
+import neopixel
 import usb_hid
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
@@ -37,8 +38,8 @@ def load_config():
                 "2": {"key": "c"},
                 "3": {"key": "d"},
             },
-            "sleep": {"timeout_s": 30, "blink_warn_s": 10},
-            "led": {"pin": "TX"},
+            "sleep": {"timeout_s": 30, "led_dim_s": 10},
+            "led": {"brightness": 0.2, "color_idle": [0, 0, 50], "color_active": [0, 200, 0], "color_sleep": [0, 0, 0]},
         }
 
 def key_to_keycode(key_str):
@@ -61,10 +62,12 @@ def key_to_keycode(key_str):
     }
     if key_str in mapping:
         return mapping[key_str]
+    # Písmena A-Z
     if len(key_str) == 1 and key_str.isalpha():
         return getattr(Keycode, key_str, None)
+    # Číslice 0-9
     if len(key_str) == 1 and key_str.isdigit():
-        return getattr(Keycode, key_str, None)
+        return getattr(Keycode, f"_{key_str}" if key_str == "0" else key_str, None)
     return None
 
 # ─── Hardware init ────────────────────────────────────────────────────────────
@@ -80,42 +83,30 @@ def init_buttons():
         buttons.append(btn)
     return buttons
 
-def init_led(pin_name="TX"):
-    pin = getattr(board, pin_name, board.TX)
-    led = digitalio.DigitalInOut(pin)
-    led.direction = digitalio.Direction.OUTPUT
-    led.value = True  # zapnout při startu
-    return led
+def init_led(brightness):
+    pixel = neopixel.NeoPixel(board.NEOPIXEL, 1, brightness=brightness, auto_write=True)
+    return pixel
 
-# ─── LED stavy ───────────────────────────────────────────────────────────────
-# Stavy jsou signalizovány blikáním:
-#   Idle:       svítí trvale
-#   Stisk:      krátký záblesk (řeší se přímo v hlavní smyčce)
-#   Brzy usne:  rychlé blikání (varování)
-#   Sleep:      vypnuto
-
-def blink(led, times=1, on_ms=50, off_ms=50):
-    for _ in range(times):
-        led.value = False
-        time.sleep(off_ms / 1000)
-        led.value = True
-        time.sleep(on_ms / 1000)
+def set_led(pixel, color):
+    pixel[0] = tuple(color)
 
 # ─── Sleep / Wake ─────────────────────────────────────────────────────────────
 
 def go_to_sleep(buttons, led):
     """Uspí zařízení. Probouzí se stiskem libovolného tlačítka."""
-    led.value = False
-    pin_alarms = [alarm.pin.PinAlarm(pin=p, value=False, pull=True) for p in BUTTON_PINS]
+    set_led(led, [0, 0, 0])
+    # Nastaví alarm na stisk tlačítka (falling edge = stisk při pull-up)
+    pin_alarms = [alarm.pin.PinAlarm(pin=btn.id, value=False, pull=True) for btn in BUTTON_PINS]
+    # Uvolnit piny před spaním
     for btn in buttons:
         btn.deinit()
     led.deinit()
     alarm.light_sleep_until_alarms(*pin_alarms)
     # Po probuzení — reinit
-    cfg = load_config()
     new_buttons = init_buttons()
-    new_led = init_led(cfg["led"].get("pin", "TX"))
-    new_led.value = True
+    cfg = load_config()
+    new_led = init_led(cfg["led"]["brightness"])
+    set_led(new_led, cfg["led"]["color_idle"])
     return new_buttons, new_led
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
@@ -124,8 +115,10 @@ def main():
     cfg = load_config()
     kbd = Keyboard(usb_hid.devices)
     buttons = init_buttons()
-    led = init_led(cfg["led"].get("pin", "TX"))
+    led = init_led(cfg["led"]["brightness"])
+    set_led(led, cfg["led"]["color_idle"])
 
+    # Sestavení mapy tlačítko → keycode
     keycodes = {}
     for idx, btn_cfg in cfg["buttons"].items():
         kc = key_to_keycode(btn_cfg.get("key", ""))
@@ -135,51 +128,44 @@ def main():
             print(f"Neznámý klíč pro tlačítko {idx}: {btn_cfg.get('key')}")
 
     timeout_s = cfg["sleep"]["timeout_s"]
-    blink_warn_s = cfg["sleep"]["blink_warn_s"]
+    dim_s = cfg["sleep"]["led_dim_s"]
     last_activity = time.monotonic()
-    warning_active = False
-
-    # Bliknutí při startu — signalizace ready
-    blink(led, times=3, on_ms=80, off_ms=80)
-    led.value = True  # idle = svítí
+    dimmed = False
 
     print("QT Py HID Keyboard ready")
 
     while True:
         now = time.monotonic()
         elapsed = now - last_activity
+        pressed_any = False
 
         for i, btn in enumerate(buttons):
-            if not btn.value:  # stisknuto
+            if not btn.value:  # stisknuto (pull-up → LOW = stisk)
+                pressed_any = True
                 kc = keycodes.get(i)
                 if kc is not None:
-                    # Krátký záblesk při stisku
-                    led.value = False
+                    set_led(led, cfg["led"]["color_active"])
                     kbd.press(kc)
-                    while not btn.value:
+                    while not btn.value:  # čekej na uvolnění
                         time.sleep(0.01)
                     kbd.release(kc)
-                    led.value = True
+                    set_led(led, cfg["led"]["color_idle"])
                     last_activity = time.monotonic()
-                    warning_active = False
+                    dimmed = False
                 time.sleep(0.05)  # debounce
 
-        # Varování před spaním — rychlé blikání
-        if elapsed > (timeout_s - blink_warn_s):
-            if not warning_active:
-                warning_active = True
-            # Bliká každou sekundu
-            led.value = (int(elapsed * 4) % 2 == 0)
+        # LED dim před spaním
+        if not dimmed and elapsed > (timeout_s - dim_s):
+            set_led(led, [5, 5, 0])  # žlutá = brzy usne
+            dimmed = True
 
-        # Sleep
+        # Deep sleep
         if elapsed > timeout_s:
             print("Going to sleep...")
             buttons, led = go_to_sleep(buttons, led)
             last_activity = time.monotonic()
-            warning_active = False
-            cfg = load_config()
-            timeout_s = cfg["sleep"]["timeout_s"]
-            blink_warn_s = cfg["sleep"]["blink_warn_s"]
+            dimmed = False
+            cfg = load_config()  # reload config po probuzení
 
         time.sleep(0.01)
 

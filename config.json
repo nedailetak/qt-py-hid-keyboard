@@ -7,9 +7,12 @@
   },
   "sleep": {
     "timeout_s": 30,
-    "blink_warn_s": 10
+    "led_dim_s": 10
   },
   "led": {
-    "pin": "TX"
+    "brightness": 0.2,
+    "color_idle": [0, 0, 50],
+    "color_active": [0, 200, 0],
+    "color_sleep": [0, 0, 0]
   }
 }
