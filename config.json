@@ -1,0 +1,18 @@
+{
+  "buttons": {
+    "0": {"key": "a", "label": "Button 0"},
+    "1": {"key": "b", "label": "Button 1"},
+    "2": {"key": "c", "label": "Button 2"},
+    "3": {"key": "d", "label": "Button 3"}
+  },
+  "sleep": {
+    "timeout_s": 30,
+    "led_dim_s": 10
+  },
+  "led": {
+    "brightness": 0.2,
+    "color_idle": [0, 0, 50],
+    "color_active": [0, 200, 0],
+    "color_sleep": [0, 0, 0]
+  }
+}
